@@ -7,8 +7,9 @@ exports.handler = async (event) => {
   console.log("Lambda invoked at:", new Date().toISOString());
   console.log("Event received:", JSON.stringify(event));
 
+  let executionId;
+
   try {
-    // Parsear el cuerpo del evento
     const body = JSON.parse(event.body);
     console.log("Parsed body:", body);
 
@@ -28,7 +29,7 @@ exports.handler = async (event) => {
     }
 
     // Generar un ID único para esta ejecución
-    const executionId = `${userId}-${showId}`;
+    executionId = `${userId}-${showId}`;
     console.log("Generated executionId:", executionId);
 
     // Verificar el estado actual del executionId en la tabla LambdaExecutionLog
@@ -51,9 +52,6 @@ exports.handler = async (event) => {
           body: JSON.stringify({ message: "Purchase already in progress." }),
         };
       }
-
-      // Si el estado es COMPLETED o FAILED, permitir nueva compra
-      console.log("Previous execution status is not IN_PROGRESS. Proceeding with new attempt.");
     }
 
     // Registrar el nuevo intento como IN_PROGRESS
@@ -70,12 +68,30 @@ exports.handler = async (event) => {
     await dynamo.put(logParams).promise();
     console.log("Execution logged successfully.");
 
+    // Verificar si el showId existe antes de actualizar
+    const checkShowParams = {
+      TableName: "ShowTickets",
+      Key: { showId },
+    };
+
+    const existingShow = await dynamo.get(checkShowParams).promise();
+    console.log("Existing show entry:", existingShow);
+
+    if (!existingShow.Item) {
+      console.log("Show ID does not exist. Returning 404 response.");
+      await updateExecutionLogStatus(executionId, "FAILED");
+      return {
+        statusCode: 404,
+        body: JSON.stringify({ message: "Show does not exist." }),
+      };
+    }
+
     // Actualizar entradas en la tabla ShowTickets
     const updateParams = {
       TableName: "ShowTickets",
       Key: { showId },
       UpdateExpression: "SET ticketsAvailable = ticketsAvailable - :decrement",
-      ConditionExpression: "attribute_exists(showId) AND ticketsAvailable > :zero",
+      ConditionExpression: "ticketsAvailable > :zero",
       ExpressionAttributeValues: {
         ":decrement": 1,
         ":zero": 0,
@@ -88,21 +104,7 @@ exports.handler = async (event) => {
     console.log("DynamoDB update result:", result);
 
     // Actualizar el estado a COMPLETED
-    const updateLogParams = {
-      TableName: "LambdaExecutionLog",
-      Key: { executionId },
-      UpdateExpression: "SET #status = :completed",
-      ExpressionAttributeNames: {
-        "#status": "status",
-      },
-      ExpressionAttributeValues: {
-        ":completed": "COMPLETED",
-      },
-    };
-
-    console.log("Updating log status to COMPLETED:", JSON.stringify(updateLogParams));
-    await dynamo.update(updateLogParams).promise();
-    console.log("Log status updated to COMPLETED.");
+    await updateExecutionLogStatus(executionId, "COMPLETED");
 
     return {
       statusCode: 200,
@@ -114,38 +116,45 @@ exports.handler = async (event) => {
   } catch (err) {
     console.error("Error during execution:", err);
 
-    if (err.code === "ConditionalCheckFailedException") {
-      console.log("Conditional check failed. Tickets unavailable or duplicate execution.");
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ message: "Tickets are sold out or purchase already processed." }),
-      };
+    if (executionId) {
+      await updateExecutionLogStatus(executionId, "FAILED");
     }
 
-    // Actualizar el estado a FAILED si ocurre un error inesperado
-    try {
-      const errorLogParams = {
-        TableName: "LambdaExecutionLog",
-        Key: { executionId },
-        UpdateExpression: "SET #status = :failed",
-        ExpressionAttributeNames: {
-          "#status": "status",
-        },
-        ExpressionAttributeValues: {
-          ":failed": "FAILED",
-        },
+    if (err.code === "ConditionalCheckFailedException") {
+      console.log("Tickets unavailable or other conflict.");
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ message: "Tickets are sold out." }),
       };
-
-      console.log("Updating log status to FAILED:", JSON.stringify(errorLogParams));
-      await dynamo.update(errorLogParams).promise();
-      console.log("Log status updated to FAILED.");
-    } catch (logError) {
-      console.error("Failed to update log status to FAILED:", logError);
     }
 
     return {
       statusCode: 500,
       body: JSON.stringify({ message: "Internal server error." }),
     };
+  }
+};
+
+// Función para actualizar el estado del log de ejecución
+const updateExecutionLogStatus = async (executionId, status) => {
+  const dynamo = new AWS.DynamoDB.DocumentClient();
+  const updateLogParams = {
+    TableName: "LambdaExecutionLog",
+    Key: { executionId },
+    UpdateExpression: "SET #status = :status",
+    ExpressionAttributeNames: {
+      "#status": "status",
+    },
+    ExpressionAttributeValues: {
+      ":status": status,
+    },
+  };
+
+  try {
+    console.log("Updating executionId status:", JSON.stringify(updateLogParams));
+    await dynamo.update(updateLogParams).promise();
+    console.log(`ExecutionId ${executionId} status updated to ${status}.`);
+  } catch (logError) {
+    console.error("Failed to update log status:", logError);
   }
 };
