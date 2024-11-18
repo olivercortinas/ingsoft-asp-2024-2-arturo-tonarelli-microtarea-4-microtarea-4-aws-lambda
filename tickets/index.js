@@ -4,23 +4,20 @@ const { validateCreditCard } = require("/opt/nodejs/validateCreditCard");
 const dynamo = new AWS.DynamoDB.DocumentClient();
 
 exports.handler = async (event) => {
-  const startTime = Date.now(); // Marcar el inicio de la ejecución
   console.log("Lambda invoked at:", new Date().toISOString());
-  console.log("Event received:", JSON.stringify(event)); // Log del evento completo recibido
+  console.log("Event received:", JSON.stringify(event));
 
   try {
     // Parsear el cuerpo del evento
-    const parseStart = Date.now();
     const body = JSON.parse(event.body);
-    console.log("Parsed body:", body, "Time taken:", Date.now() - parseStart, "ms");
+    console.log("Parsed body:", body);
 
     const { creditCard, showId, userId } = body;
     console.log("Extracted fields - creditCard:", creditCard, "showId:", showId, "userId:", userId);
 
     // Validar tarjeta de crédito
-    const validateStart = Date.now();
     const validation = validateCreditCard(creditCard);
-    console.log("Credit card validation result:", validation, "Time taken:", Date.now() - validateStart, "ms");
+    console.log("Credit card validation result:", validation);
 
     if (!validation.isValid) {
       console.log("Invalid credit card. Returning 400 response.");
@@ -34,23 +31,46 @@ exports.handler = async (event) => {
     const executionId = `${userId}-${showId}`;
     console.log("Generated executionId:", executionId);
 
-    // Registrar la ejecución en LambdaExecutionLog
-    const logStart = Date.now();
+    // Verificar el estado actual del executionId en la tabla LambdaExecutionLog
+    const logCheckParams = {
+      TableName: "LambdaExecutionLog",
+      Key: { executionId },
+    };
+
+    const existingLog = await dynamo.get(logCheckParams).promise();
+    console.log("Existing log entry:", existingLog);
+
+    if (existingLog.Item) {
+      const { status } = existingLog.Item;
+      console.log("Current status:", status);
+
+      if (status === "IN_PROGRESS") {
+        console.log("Operation already in progress. Returning 400 response.");
+        return {
+          statusCode: 400,
+          body: JSON.stringify({ message: "Purchase already in progress." }),
+        };
+      }
+
+      // Si el estado es COMPLETED o FAILED, permitir nueva compra
+      console.log("Previous execution status is not IN_PROGRESS. Proceeding with new attempt.");
+    }
+
+    // Registrar el nuevo intento como IN_PROGRESS
     const logParams = {
       TableName: "LambdaExecutionLog",
       Item: {
-        executionId, // Clave de partición única
+        executionId,
         timestamp: new Date().toISOString(),
+        status: "IN_PROGRESS",
       },
-      ConditionExpression: "attribute_not_exists(executionId)", // Verificar que no exista previamente
     };
 
     console.log("Attempting to log execution:", JSON.stringify(logParams));
     await dynamo.put(logParams).promise();
-    console.log("Execution logged successfully. Time taken:", Date.now() - logStart, "ms");
+    console.log("Execution logged successfully.");
 
     // Actualizar entradas en la tabla ShowTickets
-    const dynamoStart = Date.now();
     const updateParams = {
       TableName: "ShowTickets",
       Key: { showId },
@@ -65,15 +85,25 @@ exports.handler = async (event) => {
 
     console.log("DynamoDB update parameters:", JSON.stringify(updateParams));
     const result = await dynamo.update(updateParams).promise();
-    console.log(
-      "DynamoDB update result:",
-      result,
-      "Time taken for DynamoDB operation:",
-      Date.now() - dynamoStart,
-      "ms"
-    );
+    console.log("DynamoDB update result:", result);
 
-    console.log("Lambda completed successfully in:", Date.now() - startTime, "ms");
+    // Actualizar el estado a COMPLETED
+    const updateLogParams = {
+      TableName: "LambdaExecutionLog",
+      Key: { executionId },
+      UpdateExpression: "SET #status = :completed",
+      ExpressionAttributeNames: {
+        "#status": "status",
+      },
+      ExpressionAttributeValues: {
+        ":completed": "COMPLETED",
+      },
+    };
+
+    console.log("Updating log status to COMPLETED:", JSON.stringify(updateLogParams));
+    await dynamo.update(updateLogParams).promise();
+    console.log("Log status updated to COMPLETED.");
+
     return {
       statusCode: 200,
       body: JSON.stringify({
@@ -84,16 +114,35 @@ exports.handler = async (event) => {
   } catch (err) {
     console.error("Error during execution:", err);
 
-    // Si ya existe el registro en LambdaExecutionLog
     if (err.code === "ConditionalCheckFailedException") {
-      console.log("Execution already logged or tickets unavailable.");
+      console.log("Conditional check failed. Tickets unavailable or duplicate execution.");
       return {
         statusCode: 400,
         body: JSON.stringify({ message: "Tickets are sold out or purchase already processed." }),
       };
     }
 
-    // Manejo de otros errores inesperados
+    // Actualizar el estado a FAILED si ocurre un error inesperado
+    try {
+      const errorLogParams = {
+        TableName: "LambdaExecutionLog",
+        Key: { executionId },
+        UpdateExpression: "SET #status = :failed",
+        ExpressionAttributeNames: {
+          "#status": "status",
+        },
+        ExpressionAttributeValues: {
+          ":failed": "FAILED",
+        },
+      };
+
+      console.log("Updating log status to FAILED:", JSON.stringify(errorLogParams));
+      await dynamo.update(errorLogParams).promise();
+      console.log("Log status updated to FAILED.");
+    } catch (logError) {
+      console.error("Failed to update log status to FAILED:", logError);
+    }
+
     return {
       statusCode: 500,
       body: JSON.stringify({ message: "Internal server error." }),
