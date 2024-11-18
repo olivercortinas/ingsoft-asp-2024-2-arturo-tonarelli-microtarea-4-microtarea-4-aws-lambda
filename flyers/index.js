@@ -5,13 +5,13 @@ const { Pool } = require('pg');
 // Inicializar clientes de AWS y PostgreSQL
 const s3 = new AWS.S3();
 const pool = new Pool({
-    host: process.env.DB_HOST, // Host de la base de datos
-    port: process.env.DB_PORT, // Puerto de la base de datos
-    user: process.env.DB_USER, // Usuario de la base de datos
-    password: process.env.DB_PASSWORD, // Contraseña de la base de datos
-    database: process.env.DB_NAME, // Nombre de la base de datos
-    max: 5, // Máximo de conexiones en el pool
-    idleTimeoutMillis: 30000, // Tiempo máximo de inactividad antes de cerrar conexiones
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    max: 5,
+    idleTimeoutMillis: 30000,
     ssl: {
         rejectUnauthorized: false, // Desactiva la validación del certificado para pruebas
     },
@@ -19,7 +19,7 @@ const pool = new Pool({
 
 // Función Lambda
 exports.handler = async (event) => {
-    let client; // Cliente de la base de datos
+    let client;
     try {
         console.log('Evento recibido:', JSON.stringify(event));
 
